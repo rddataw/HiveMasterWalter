@@ -6,8 +6,17 @@
 #include "esp_sleep.h"
 
 /**
+ *# Odeslani git na lokalni server
+ * git push local main
+ * git push github main
+ * git remote -v
  *
- *
+ * github  https://github.com/rddataw/HiveMasterWalter.git (fetch)
+github  https://github.com/rddataw/HiveMasterWalter.git (push)
+local   http://192.168.1.10:3003/rad/HiveMasterWalter.git (fetch)
+local   http://192.168.1.10:3003/rad/HiveMasterWalter.git (push)
+origin  https://github.com/rddataw/HiveMasterWalter.git (fetch)
+origin  https://github.com/rddataw/HiveMasterWalter.git (push)
  *
  * sudo fuser -k 6666/tcp
  *
@@ -42,6 +51,8 @@ kill -TERM 76572 && sleep 1; ss -ltnp 'sport = :6666'
 // const char *FLESPI_TOKEN = "1cSeh0jEzfki6ji4glpKzUqz0NaRzxbCeWJCkZyU1gS1vf8JqGvaKeBtC3xJV6cJ";
 #define FLESPI_TOKEN "1cSeh0jEzfki6ji4glpKzUqz0NaRzxbCeWJCkZyU1gS1vf8JqGvaKeBtC3xJV6cJ"
 
+#define TAG "UART_PARSER"
+
 #define UART_PORT_NUM UART_NUM_2 // Samostatný UART pro komunikaci se STM32
 #define UART_BUFFER_SIZE 2048    // Vaše velikost bufferu
 #define UART_RX_TIMEOUT_SYMBOLS 20
@@ -55,8 +66,10 @@ kill -TERM 76572 && sleep 1; ss -ltnp 'sport = :6666'
 #define CTS_ESP 18
 
 size_t bufferDataLength;
-QueueHandle_t uart2EventQueue;
+
 uint32_t hiveTime = 0;
+
+static QueueHandle_t uart2EventQueue = NULL;
 
 TimerHandle_t TimeoutTimer = NULL;
 
@@ -581,119 +594,6 @@ bool gotoSleep()
   return true;
 }
 
-// -----------------------------------------------------------------------------
-// Function: zpracujBuffer
-// Protokol: [type:1B][sn:1B][len:1B][data:len B] ...
-//   - hlavicka = 3 B (type, sn, len)
-//   - len       = pocet datovych bajtu ZA hlavickou (NE celkova delka structu!)
-//   - celkova delka zaznamu = 3 + len
-// -----------------------------------------------------------------------------
-// -----------------------------------------------------------------------------
-// Function: nactiBuffer (Upraveno pro čtení dávky více paketů naráz)
-// -----------------------------------------------------------------------------
-// -----------------------------------------------------------------------------
-// 1. Funkce: nactiBuffer
-//    Načte z UARTu hlavičku (3B) + data podle délky z 3. bajtu.
-//    Podporuje načtení více paketů najednou, pokud jsou v bufferu připraveny.
-// -----------------------------------------------------------------------------
-bool processAndPublishUartMessages(void)
-{
-  uint8_t uartBuffer[UART_BUFFER_SIZE];
-
-  // 1. Čekáme na data z UARTu (blokující čtení s timeoutem např. 10000 ms).
-  int bytesRead = uart_read_bytes(UART_PORT_NUM, uartBuffer, sizeof(uartBuffer), pdMS_TO_TICKS(10000));
-
-  if (bytesRead <= 0)
-  {
-    // Timeout – žádná data nepřišla
-    return false;
-  }
-
-  size_t bufferDataLength = (size_t)bytesRead;
-  ESP_LOGI(TAG, "UART: Přijat kompletní blok dat o velikosti %u B", bufferDataLength);
-
-  // 2. Kontrola, zda jsou přijata alespoň 4 bajty + 1 bajt CRC (min. 5 B)
-  // (3B hlavička + min. 1B payloadu + 1B CRC)
-  if (bufferDataLength < 5)
-  {
-    ESP_LOGW(TAG, "Příliš krátká data: přijato pouze %u B (vyžadováno min. 5 B)", bufferDataLength);
-    return false;
-  }
-
-  // --- KONTROLA CRC (XOR checksumu) ---
-  // Vysílač přidal checksum na úplný konec bufferu (poslední bajt).
-  // Spočítáme XOR přes všechna data před ním.
-  uint8_t receivedChecksum = uartBuffer[bufferDataLength - 1];
-  uint8_t calculatedChecksum = 0;
-
-  for (size_t i = 0; i < bufferDataLength - 1; ++i)
-  {
-    calculatedChecksum ^= uartBuffer[i];
-  }
-
-  if (calculatedChecksum != receivedChecksum)
-  {
-    ESP_LOGE(TAG, "Chyba CRC! Vypočteno: 0x%02X, Přijato: 0x%02X -> Zahazuji paket",
-             calculatedChecksum, receivedChecksum);
-    return false;
-  }
-
-  ESP_LOGI(TAG, "CRC v pořádku (0x%02X)", calculatedChecksum);
-
-  // Zmenšíme délku dat o 1 bajt CRC, abychom ho neparsovali jako zprávu
-  size_t dataPayloadLength = bufferDataLength - 1;
-
-  // 3. Zpracování bufferu a rozsekání na jednotlivé zprávy
-  size_t pos = 0;
-
-  while (pos < dataPayloadLength)
-  {
-    // Kontrola, zda zbývá dost místa alespoň na 3bajtovou hlavičku
-    if (dataPayloadLength - pos < 3)
-    {
-      ESP_LOGW(TAG, "Zbytkové bajty na konci bufferu (%u B), ukončuji zpracování",
-               (unsigned)(dataPayloadLength - pos));
-      break;
-    }
-
-    uint8_t type = uartBuffer[pos++];
-    uint8_t sn = uartBuffer[pos++];
-    uint8_t len = uartBuffer[pos++];
-
-    size_t payloadPos = pos;
-
-    // Kontrola, zda zbytek bufferu obsahuje celý deklarovaný payload
-    if (dataPayloadLength - pos < (size_t)len)
-    {
-      ESP_LOGE(TAG, "Neplatná délka záznamu: hlavička+data = 3+%u = %u B, "
-                    "ale v bufferu zbývají jen %u B",
-               (unsigned)len, 3u + (unsigned)len,
-               (unsigned)(dataPayloadLength - pos));
-      return false;
-    }
-
-    ESP_LOGI(TAG, "Record: type=%u sn=%u len=%u (payload %u B)",
-             type, sn, len, (unsigned)len);
-
-    char topic[32];
-    snprintf(topic, sizeof(topic), "bz/%u/%u", type, sn);
-
-    // Odesíláme čistě data payloadu (bez bajtu len)
-    if (!mqttPublishBinarni(topic, &uartBuffer[payloadPos], (size_t)len))
-    {
-      ESP_LOGE(TAG, "MQTT publish failed pro topic %s", topic);
-    }
-
-    // Posun pozice na další zprávu v bufferu
-    pos += len;
-  }
-
-  return true;
-}
-
-// -----------------------------------------------------------------------------
-// Zapnuti modemu
-// -----------------------------------------------------------------------------
 bool modemStart()
 {
   /* Start modem */
@@ -843,6 +743,157 @@ void vTimeoutTimerCallback(TimerHandle_t pxTimer)
   gotoSleep();
 }
 
+//---------------------------------------------------------
+// 1. Inicializace UARTu s hardwarovým řízením toku (CTS/RTS)
+//---------------------------------------------------------
+void uartStmConfig(void)
+{
+
+  // 1. Konfigurace CTS UART 2 jako vstup a zapnuti pull-up
+  gpio_config_t io_conf = {
+      .pin_bit_mask = (1ULL << GPIO_NUM_18),
+      .mode = GPIO_MODE_INPUT,
+      .pull_up_en = GPIO_PULLUP_DISABLE,
+      .pull_down_en = GPIO_PULLDOWN_ENABLE,
+      .intr_type = GPIO_INTR_DISABLE};
+  gpio_config(&io_conf);
+
+  // Konfigurace parametrů UART s hardwarovým řízením toku
+  uart_config_t uart_config{};
+  uart_config.baud_rate = 115200;
+  uart_config.data_bits = UART_DATA_8_BITS;
+  uart_config.parity = UART_PARITY_DISABLE;
+  uart_config.stop_bits = UART_STOP_BITS_1;
+  uart_config.flow_ctrl = UART_HW_FLOWCTRL_CTS_RTS;
+  uart_config.rx_flow_ctrl_thresh = 120;
+  uart_config.source_clk = UART_SCLK_DEFAULT;
+
+  uart_param_config(UART_PORT_NUM, &uart_config);
+
+  // Nastavení TX, RX, RTS a CTS pinů
+  uart_set_pin(UART_PORT_NUM, TX_ESP, RX_ESP, RTS_ESP, CTS_ESP);
+
+  // Instalace ovladače UART s frontou událostí
+  ESP_ERROR_CHECK(uart_driver_install(
+      UART_PORT_NUM,
+      UART_BUFFER_SIZE,
+      UART_BUFFER_SIZE,
+      20,
+      &uart2EventQueue,
+      0));
+
+  ESP_ERROR_CHECK(uart_set_rx_timeout(UART_PORT_NUM, UART_RX_TIMEOUT_SYMBOLS));
+  uart_flush_input(UART_PORT_NUM);
+
+  if (uart2EventQueue != NULL)
+  {
+    xQueueReset(uart2EventQueue);
+  }
+
+  ESP_LOGI(TAG, "UART pro STM32 inicializovan a vycisten");
+}
+
+// -----------------------------------------------------------------------------
+// Poslani dat z uart na mqtt
+// -----------------------------------------------------------------------------
+bool uartProcessAndPublishMessages(void)
+{
+  uint8_t uartBuffer[UART_BUFFER_SIZE];
+
+  // Čekáme na data z UARTu (blokující čtení s timeoutem např. 10000 ms)
+  int bytesRead = uart_read_bytes(UART_PORT_NUM, uartBuffer, sizeof(uartBuffer), pdMS_TO_TICKS(10000));
+
+  if (bytesRead <= 0)
+  {
+    // Timeout – žádná data nepřišla
+    return false;
+  }
+
+  size_t bufferLength = (size_t)bytesRead;
+  ESP_LOGI(TAG, "UART: Přijat celkový blok o velikosti %u B", bufferLength);
+
+  size_t pos = 0;
+  bool successCount = false;
+
+  // Parsování celého bloku zpráva po zprávě
+  while (pos < bufferLength)
+  {
+    // A. Kontrola startovacího bajtu 0xAA
+    if (uartBuffer[pos] != 0xAA)
+    {
+      ESP_LOGW(TAG, "Očekáván start 0xAA na pozici %u, nalezeno 0x%02X. Resynchronizace (+1B)",
+               (unsigned)pos, uartBuffer[pos]);
+      pos++; // Posun o 1 bajt pro nalezení správného začátku v případě rušení
+      continue;
+    }
+
+    // B. Ověření, zda máme v bufferu dost místa alespoň na hlavičku (1B start + 3B hlavička = 4B)
+    if (bufferLength - pos < 4)
+    {
+      ESP_LOGW(TAG, "Neúplná hlavička na konci bloku. Ukončuji parsování.");
+      break;
+    }
+
+    uint8_t type = uartBuffer[pos + 1];
+    uint8_t sn = uartBuffer[pos + 2];
+    uint8_t len = uartBuffer[pos + 3];
+
+    // C. Celková délka této dílčí zprávy: 1 (0xAA) + 3 (hlavička) + len (payload) + 1 (XOR CRC)
+    size_t expectedMsgLen = 1 + 3 + (size_t)len + 1;
+
+    // D. Kontrola, zda se celá zpráva vejde do zbývajícího bufferu
+    if (bufferLength - pos < expectedMsgLen)
+    {
+      ESP_LOGE(TAG, "Zpráva (type=%u, sn=%u) vyžaduje %u B, ale v bufferu zbývá jen %u B.",
+               type, sn, (unsigned)expectedMsgLen, (unsigned)(bufferLength - pos));
+      break;
+    }
+
+    // E. Výpočet a kontrola XOR CRC pro tuto konkrétní zprávu (od 0xAA až před CRC)
+    size_t crcIndex = pos + expectedMsgLen - 1;
+    uint8_t receivedChecksum = uartBuffer[crcIndex];
+    uint8_t calculatedChecksum = 0;
+
+    for (size_t i = pos; i < crcIndex; ++i)
+    {
+      calculatedChecksum ^= uartBuffer[i];
+    }
+
+    if (calculatedChecksum != receivedChecksum)
+    {
+      ESP_LOGE(TAG, "Chyba CRC (type=%u, sn=%u)! Vypočteno: 0x%02X, Přijato: 0x%02X -> Zahazuji tuto zprávu",
+               type, sn, calculatedChecksum, receivedChecksum);
+
+      // Při chybě posuneme pozici o 1 bajt, abychom zkusili najít další platný paket
+      pos++;
+      continue;
+    }
+
+    // F. Zpráva je v pořádku -> připravíme payload a odešleme do MQTT
+    size_t payloadPos = pos + 4; // Data začínají hned za type, sn, len
+
+    ESP_LOGI(TAG, "Sub-zpráva OK: type=%u sn=%u len=%u (payload %u B)",
+             type, sn, len, (unsigned)len);
+
+    char topic[32];
+    snprintf(topic, sizeof(topic), "bz/%u/%u", type, sn);
+
+    if (mqttPublishBinarni(topic, &uartBuffer[payloadPos], (size_t)len))
+    {
+      successCount = true;
+    }
+    else
+    {
+      ESP_LOGE(TAG, "MQTT publish failed pro topic %s", topic);
+    }
+
+    // G. Posun na začátek další zprávy v bloku
+    pos += expectedMsgLen;
+  }
+
+  return successCount;
+}
+
 // #############################################################################
 // Function: app_main
 // #############################################################################
@@ -853,6 +904,15 @@ extern "C" void app_main()
 {
 
   ESP_LOGI(TAG, "\r\n\r\n=== HiveMqttWalter ===\r\n\r\n");
+
+  // Konfigurace pinu 17 - to je pin wakeup
+  gpio_config_t io_conf = {
+      .pin_bit_mask = (1ULL << GPIO_NUM_17),
+      .mode = GPIO_MODE_INPUT,
+      .pull_up_en = GPIO_PULLUP_DISABLE,
+      .pull_down_en = GPIO_PULLDOWN_ENABLE,
+      .intr_type = GPIO_INTR_DISABLE};
+  gpio_config(&io_conf);
 
   // Casovac .. timeout behu programu - max 60 sekund
   if (TimeoutTimer == NULL)
@@ -870,17 +930,11 @@ extern "C" void app_main()
     xTimerStart(TimeoutTimer, 0);
   }
 
-  // 1. Konfigurace CTS UART 2 jako vstup a zapnuti pull-up
-  gpio_config_t io_conf = {
-      .pin_bit_mask = (1ULL << GPIO_NUM_17),
-      .mode = GPIO_MODE_INPUT,
-      .pull_up_en = GPIO_PULLUP_DISABLE,
-      .pull_down_en = GPIO_PULLDOWN_ENABLE,
-      .intr_type = GPIO_INTR_DISABLE};
-  gpio_config(&io_conf);
-
   TickType_t start_tick = xTaskGetTickCount();
   TickType_t timeout_ticks = pdMS_TO_TICKS(10000); // 10000 ms
+
+  // Konfigurace UART pro STM32
+  uartStmConfig();
 
   if (!modemStart())
   {
@@ -899,9 +953,6 @@ extern "C" void app_main()
   {
     ESP_LOGI(TAG, "Modem MQTT start OK");
   }
-
-  // Aktivace UART až po úplném náběhu modemu a MQTT
-  uartStmConfig();
 
   while (true)
   {
@@ -922,15 +973,13 @@ extern "C" void app_main()
     // Vyčistit UART od smetí / předchozích dat před odesláním času a čtením
     uart_flush_input(UART_PORT_NUM);
 
-    xQueueReset(uart2EventQueue);
-
     if (!sendTime())
     {
       ESP_LOGE(TAG, "Time frame was not sent");
     }
 
     ESP_LOGI(TAG, "Waiting for UART response...");
-    if (processAndPublishUartMessages() == true)
+    if (uartProcessAndPublishMessages() == true)
     {
       ESP_LOGI(TAG, "Buffer nacten, delka: %u", (unsigned)bufferDataLength - 3);
     }
