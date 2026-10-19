@@ -4,7 +4,7 @@
 // #include <secret.h>
 
 #include "esp_sleep.h"
-
+#include "esp_log.h" 
 /**
  *# Odeslani git na lokalni server
  * git push local main
@@ -51,7 +51,7 @@ kill -TERM 76572 && sleep 1; ss -ltnp 'sport = :6666'
 // const char *FLESPI_TOKEN = "1cSeh0jEzfki6ji4glpKzUqz0NaRzxbCeWJCkZyU1gS1vf8JqGvaKeBtC3xJV6cJ";
 #define FLESPI_TOKEN "1cSeh0jEzfki6ji4glpKzUqz0NaRzxbCeWJCkZyU1gS1vf8JqGvaKeBtC3xJV6cJ"
 
-#define TAG "UART_PARSER"
+// #define TAG "UART_PARSER"
 
 #define UART_PORT_NUM UART_NUM_2 // Samostatný UART pro komunikaci se STM32
 #define UART_BUFFER_SIZE 2048    // Vaše velikost bufferu
@@ -403,7 +403,7 @@ static void myMQTTEventHandler(WMMQTTEventType event, const WMMQTTEventData *dat
 // -----------------------------------------------------------------------------
 // Function: uartStmConfig - uart pro komunikaci se STM32
 // -----------------------------------------------------------------------------
-void uartStmConfig()
+void uartStmConfig_check()
 {
   // 1. Konfigurace parametrů UART s hardwarovým řízením toku
   uart_config_t uart_config{};
